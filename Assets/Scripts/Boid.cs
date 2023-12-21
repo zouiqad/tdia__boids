@@ -1,189 +1,121 @@
+﻿using System.Collections;
 using System.Collections.Generic;
-using Unity.VisualScripting;
 using UnityEngine;
 
-public class Boid : MonoBehaviour
-{
-    public float speed = 5f;
-    public float rotationSpeed = 2f;
-    public float neighborRadius = 5f;
-    public float separationDistance = 4f;
+public class Boid : MonoBehaviour {
 
-    // Define bounding box constraints
-    public float minX = -20f;
-    public float maxX = 20f;
-    public float minY = -20f;
-    public float maxY = 20f;
-    public float minZ = -20f;
-    public float maxZ = 20f;
+    BoidSettings settings;
 
-    public List<Vector3> near;
+    // State
+    [HideInInspector]
+    public Vector3 position;
+    [HideInInspector]
+    public Vector3 forward;
+    Vector3 velocity;
 
-    private void UpdateBounds()
-    {
-        GameObject boundingBox = GameObject.Find("Cube");
-        Mesh boundingBoxMesh = boundingBox.GetComponent<MeshFilter>().mesh;
+    // To update:
+    Vector3 acceleration;
+    [HideInInspector]
+    public Vector3 avgFlockHeading;
+    [HideInInspector]
+    public Vector3 avgAvoidanceHeading;
+    [HideInInspector]
+    public Vector3 centreOfFlockmates;
+    [HideInInspector]
+    public int numPerceivedFlockmates;
 
-        float scale = 
-        minX = boundingBoxMesh.bounds.min.x * boundingBox.transform.localScale.x;
-        maxX = boundingBoxMesh.bounds.max.x * boundingBox.transform.localScale.x;
-        minY = boundingBoxMesh.bounds.min.y * boundingBox.transform.localScale.y;
-        maxY = boundingBoxMesh.bounds.max.y * boundingBox.transform.localScale.y;
-        minZ = boundingBoxMesh.bounds.min.z * boundingBox.transform.localScale.z;
-        maxZ = boundingBoxMesh.bounds.max.z * boundingBox.transform.localScale.z;
+    // Cached
+    Material material;
+    Transform cachedTransform;
+    Transform target;
+
+    void Awake () {
+        material = transform.GetComponentInChildren<MeshRenderer> ().material;
+        cachedTransform = transform;
     }
 
-    void Update()
-    {
-        UpdateBounds();
+    public void Initialize (BoidSettings settings, Transform target) {
+        this.target = target;
+        this.settings = settings;
 
-        // Apply boids rules
-        Vector3 separation = Separation();
-        Vector3 alignment = Alignment();
-        Vector3 cohesion = Cohesion();
+        position = cachedTransform.position;
+        forward = cachedTransform.forward;
 
-        // Combine rules and move the boid
-        Vector3 moveDirection = separation + alignment + cohesion;
+        float startSpeed = (settings.minSpeed + settings.maxSpeed) / 2;
+        velocity = transform.forward * startSpeed;
+    }
 
-        // Check and handle bounding box constraints
-        CheckBounds();
-
-        transform.Translate(moveDirection.normalized * speed * Time.deltaTime, Space.Self);
-
-        transform.Translate(moveDirection.normalized * speed * Time.deltaTime, Space.Self);
-
-        // Rotate towards the movement direction
-        if (moveDirection != Vector3.zero)
-        {
-            Quaternion toRotation = Quaternion.LookRotation(moveDirection, Vector3.up);
-            transform.rotation = Quaternion.Slerp(transform.rotation, toRotation, rotationSpeed * Time.deltaTime);
+    public void SetColour (Color col) {
+        if (material != null) {
+            material.color = col;
         }
     }
 
-    Vector3 Separation()
-    {
-        Vector3 separationVector = Vector3.zero;
-        Collider[] neighbors = Physics.OverlapSphere(transform.position, neighborRadius);
-        
-        foreach (Collider neighbor in neighbors)
-        {
-            if (neighbor.gameObject != gameObject)
-            {
-                Vector3 toNeighbor = transform.position - neighbor.transform.position;
-                float distance = toNeighbor.magnitude;
-                near.Add(neighbor.transform.position);
-                Debug.Log($"{neighbor.name} distance {distance}");
-                if (distance < separationDistance)
-                {
-                    separationVector += toNeighbor.normalized / distance;
-                }
+    public void UpdateBoid () {
+        Vector3 acceleration = Vector3.zero;
 
+        if (target != null) {
+            Vector3 offsetToTarget = (target.position - position);
+            acceleration = SteerTowards (offsetToTarget) * settings.targetWeight;
+        }
+
+        if (numPerceivedFlockmates != 0) {
+            centreOfFlockmates /= numPerceivedFlockmates;
+
+            Vector3 offsetToFlockmatesCentre = (centreOfFlockmates - position);
+
+            var alignmentForce = SteerTowards (avgFlockHeading) * settings.alignWeight;
+            var cohesionForce = SteerTowards (offsetToFlockmatesCentre) * settings.cohesionWeight;
+            var seperationForce = SteerTowards (avgAvoidanceHeading) * settings.seperateWeight;
+
+            acceleration += alignmentForce;
+            acceleration += cohesionForce;
+            acceleration += seperationForce;
+        }
+
+        if (IsHeadingForCollision ()) {
+            Vector3 collisionAvoidDir = ObstacleRays ();
+            Vector3 collisionAvoidForce = SteerTowards (collisionAvoidDir) * settings.avoidCollisionWeight;
+            acceleration += collisionAvoidForce;
+        }
+
+        velocity += acceleration * Time.deltaTime;
+        float speed = velocity.magnitude;
+        Vector3 dir = velocity / speed;
+        speed = Mathf.Clamp (speed, settings.minSpeed, settings.maxSpeed);
+        velocity = dir * speed;
+
+        cachedTransform.position += velocity * Time.deltaTime;
+        cachedTransform.forward = dir;
+        position = cachedTransform.position;
+        forward = dir;
+    }
+
+    bool IsHeadingForCollision () {
+        RaycastHit hit;
+        if (Physics.SphereCast (position, settings.boundsRadius, forward, out hit, settings.collisionAvoidDst, settings.obstacleMask)) {
+            return true;
+        } else { }
+        return false;
+    }
+
+    Vector3 ObstacleRays () {
+        Vector3[] rayDirections = BoidHelper.directions;
+
+        for (int i = 0; i < rayDirections.Length; i++) {
+            Vector3 dir = cachedTransform.TransformDirection (rayDirections[i]);
+            Ray ray = new Ray (position, dir);
+            if (!Physics.SphereCast (ray, settings.boundsRadius, settings.collisionAvoidDst, settings.obstacleMask)) {
+                return dir;
             }
         }
 
-
-        return separationVector;
+        return forward;
     }
 
-    void CheckBounds()
-    {
-        Vector3 pos = transform.position;
-
-        // Check X axis
-        if (pos.x < minX || pos.x > maxX)
-        {
-            transform.position = new Vector3(Mathf.Clamp(pos.x, minX, maxX), pos.y, pos.z);
-            BounceOnAxis(true, false, false);
-        }
-
-        // Check Y axis
-        if (pos.y < minY || pos.y > maxY)
-        {
-            transform.position = new Vector3(pos.x, Mathf.Clamp(pos.y, minY, maxY), pos.z);
-            BounceOnAxis(false, true, false);
-        }
-
-        // Check Z axis
-        if (pos.z < minZ || pos.z > maxZ)
-        {
-            transform.position = new Vector3(pos.x, pos.y, Mathf.Clamp(pos.z, minZ, maxZ));
-            BounceOnAxis(false, false, true);
-        }
+    Vector3 SteerTowards (Vector3 vector) {
+        Vector3 v = vector.normalized * settings.maxSpeed - velocity;
+        return Vector3.ClampMagnitude (v, settings.maxSteerForce);
     }
 
-    void BounceOnAxis(bool bounceX, bool bounceY, bool bounceZ)
-    {
-        Vector3 moveDirection = Vector3.zero;
-
-        if (bounceX)
-        {
-            moveDirection.x = -Mathf.Sign(transform.forward.x);
-        }
-
-        if (bounceY)
-        {
-            moveDirection.y = -Mathf.Sign(transform.forward.y);
-        }
-
-        if (bounceZ)
-        {
-            moveDirection.z = -Mathf.Sign(transform.forward.z);
-        }
-
-        transform.rotation = Quaternion.LookRotation(moveDirection, Vector3.up);
-    }
-
-    void OnDrawGizmos()
-    {
-        // Draw the main sphere
-        Gizmos.color = Color.blue;
-        Gizmos.DrawWireSphere(transform.position, neighborRadius);
-
-        foreach(var n in near)
-        {
-            Gizmos.color = Color.yellow;
-            Gizmos.DrawLine(transform.position, n);
-        }
-
-    }
-            
-    Vector3 Alignment()
-    {
-        Vector3 alignmentVector = Vector3.zero;
-        Collider[] neighbors = Physics.OverlapSphere(transform.position, neighborRadius);
-
-        foreach (Collider neighbor in neighbors)
-        {
-            if (neighbor.gameObject != gameObject)
-            {
-                alignmentVector += neighbor.transform.forward;
-            }
-        }
-
-        return alignmentVector.normalized;
-    }
-
-    Vector3 Cohesion()
-    {
-        Vector3 cohesionVector = Vector3.zero;
-        Collider[] neighbors = Physics.OverlapSphere(transform.position, neighborRadius);
-        int count = 0;
-
-        foreach (Collider neighbor in neighbors)
-        {
-            if (neighbor.gameObject != gameObject)
-            {
-                cohesionVector += neighbor.transform.position;
-                count++;
-            }
-        }
-
-        if (count > 0)
-        {
-            cohesionVector /= count;
-            cohesionVector = (cohesionVector - transform.position).normalized;
-        }
-
-        return cohesionVector;
-    }
 }
